@@ -63,11 +63,46 @@ test doubles used by the suite.
   `stuck_after` seconds (45 by default), so visitors who are merely mid-handshake
   no longer consume a slot. Genuinely stuck sessions are still capped, so the
   brute-force defence is preserved.
-- A background reaper closes and forgets peers that are dead or have lingered
-  unauthenticated for `stale_after` seconds (120 by default), so an abandoned
-  load cannot hold a slot forever.
-- `_send_with_backpressure` gains a deadline, so a stalled peer can no longer
-  pin a request handler indefinitely.
+- A background reaper, run every `reap_interval` seconds (10 by default),
+  forgets two kinds of peer: any peer whose connection has ended (`closed` or
+  `failed`, which aiortc never leaves), and any unauthenticated handshake that
+  has not connected within `stale_after` seconds (60 by default). An abandoned
+  load therefore cannot hold a slot forever, and `self.peers` no longer grows
+  with every visitor who ever connected.
+- `_send_with_backpressure` stops waiting as soon as the channel closes, and
+  raises `SendStalledError` when a live peer has not drained for
+  `send_deadline` seconds (15 by default), so a stalled peer can no longer pin a
+  request handler indefinitely.
+
+### Design notes
+
+A few choices are deliberate and are covered by regression tests.
+
+- **A connected visitor at the PIN prompt is never reaped.** A peer whose
+  connection is up but who has not authenticated is a person typing a PIN.
+  Closing it would strand that person, so it only counts toward the admission
+  cap once stuck. When the tab closes, aiortc moves the peer to `closed` or
+  `failed`, and the reaper reclaims it then.
+- **A stalled send raises instead of skipping the frame.** SWSP runs over a
+  reliable, ordered channel with no gap detection, so a silently skipped frame
+  corrupts the response body. If the skipped frame is the final `FIN`, the
+  browser waits forever. Raising lets bitbang finish the stream with a complete
+  500 response. Send errors propagate to bitbang for the same reason.
+- **Peers are dropped by identity, not by client id.** The reaper awaits each
+  `close()`, and a reconnecting client can register a fresh peer under the same
+  id during that await. A drop therefore only removes the exact peer it judged
+  unservable. `handle_request` also retires a reconnecting client's old peer
+  itself, because bitbang's own cleanup deletes by key after an await and would
+  raise `KeyError` if the reaper got there first. Bitbang swallows that error,
+  so the visitor would receive no offer.
+- **Each peer carries exactly one age stamp.** The stamp is written in
+  `setup_peer_connection`, which bitbang calls in the same synchronous step
+  that registers the peer. A refused request is therefore never stamped, and
+  the reaper prunes any stamp left without a peer.
+
+The refusal that remains for genuinely stuck sessions is still silent, because
+bitbang's signaling protocol has no message that tells the browser it was
+turned away. The fix makes that refusal rare; it cannot make it visible.
 
 ## How to test
 
@@ -81,7 +116,9 @@ uv run scripts/bitbang_loadtest.py --clients 30
 ```
 
 It compares stock `BitBangWSGI` against `FormtuistBitBang` and exits non-zero if
-the expected difference is not observed. The expected output is:
+the expected difference is not observed. Stock bitbang only refuses a burst that
+is larger than its cap of ten, so a run with ten or fewer clients checks only
+that the fix refuses nobody. The expected output is:
 
 ```text
 scenario                                 baseline          fixed
@@ -102,9 +139,14 @@ arrivals forever and the fix admits all of them.
 uv run pytest tests/test_bitbang_admission.py
 ```
 
-Twenty-three tests cover stuck-session accounting, peer reaping, and the send
-deadline. They reuse the load test's doubles and redirect `HOME` so no identity
-is written to `~/.bitbang`.
+Thirty-nine tests cover stuck-session accounting, age stamps, peer reaping
+(including the reconnect races), adapter shutdown, and the send deadline. One
+test drives bitbang's real WSGI send loop to show that a stalled stream ends
+with a complete 500 response. The tests reuse the load test's doubles. Every
+adapter uses an ephemeral identity, so nothing is written to `~/.bitbang`. As a
+second safeguard, the tests point both `HOME` and `USERPROFILE` at a temporary
+directory, since Windows resolves `~` through `USERPROFILE`. Bitbang's console
+output is captured, so the suite stays silent even under `pytest -s`.
 
 ### 3. A manual smoke test
 

@@ -958,7 +958,10 @@ ______________________________________________________________________
 1. Start a local textual-serve process in a child process.
 1. Wrap the local HTTP server in the rewriting proxy used by bitbang.
 1. Set bitbang's WebSocket target to the local textual-serve server.
-1. Run `BitBangWSGI`, which prints the public URL and QR code.
+1. Run `FormtuistBitBang`, a `BitBangWSGI` subclass that admits bursts of
+   visitors and reclaims abandoned peers (see
+   `docs/bitbang-admission-control.md`), which prints the public URL and QR
+   code.
 1. Stop the local textual-serve process when the publishing session ends.
 
 The proxy removes textual-serve's absolute local origin from HTML responses.
