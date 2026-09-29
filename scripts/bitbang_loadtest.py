@@ -5,18 +5,19 @@
 """Load-test bitbang admission control the way a class actually hits it.
 
 Formtuist publishes forms through bitbang, whose listener admits only ten
-concurrent *unauthenticated* peers. Because bitbang registers a peer when the
-signaling offer arrives but marks it authenticated only once the SWSP
-``connect`` message arrives over the data channel, that ten-slot budget is
-really ten concurrent connection *setups*. A class opening one link at the
-same moment exceeds it, the rejection is silent, and peers that never
-authenticate are never reaped.
+concurrent unauthenticated peers. Because bitbang registers a peer when the
+signaling offer arrives but marks it authenticated only once the SWSP connect
+message arrives over the data channel, that ten-slot budget is really ten
+concurrent connection setups. A class opening one link at the same moment
+exceeds it, the rejection is silent, and peers that never authenticate are
+never reaped.
 
-This harness drives bitbang's real ``handle_request`` path with in-process
-doubles for the peer connection and the signaling socket. Nothing on disk is
-patched: bitbang is imported and exercised exactly as installed, and the only
-formtuist code under test is the ``FormtuistBitBang`` subclass in
-``src/formtuist/publisher.py``.
+This harness drives bitbang's real handle_request path with in-process doubles
+for the peer connection and the signaling socket. Nothing on disk is patched:
+bitbang is imported and exercised exactly as installed, and the only formtuist
+code under test is the FormtuistBitBang subclass in src/formtuist/publisher.py.
+Every adapter uses an ephemeral identity, so no identity is read from or
+written to the home directory.
 
 Run it with:
 
@@ -29,15 +30,14 @@ import contextlib
 import importlib.util
 import io
 import json
-import os
 import sys
-import tempfile
 import time
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
 from bitbang import BitBangWSGI
+from bitbang import adapter as bitbang_adapter
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 PUBLISHER_PATH = REPO_ROOT / "src" / "formtuist" / "publisher.py"
@@ -222,14 +222,10 @@ def authenticate(adapter: Any, client_id: str) -> bool:
     return bool(adapter.peers.get(client_id, {}).get("authenticated"))
 
 
-async def stop_reaper(adapter: Any) -> None:
-    """Cancel the reaper task so the loop can close cleanly."""
-    reaper = getattr(adapter, "_reaper", None)
-    if reaper is None or reaper.done():
-        return
-    reaper.cancel()
-    with contextlib.suppress(asyncio.CancelledError):
-        await reaper
+async def shut_down(adapter: Any) -> None:
+    """Close an adapter so its peers and any reaper task end cleanly."""
+    with contextlib.redirect_stdout(io.StringIO()):
+        await adapter.close()
 
 
 class Result:
@@ -271,7 +267,7 @@ async def run_burst(
                         authenticate(adapter, f"b{index}")
                     )
     finally:
-        await stop_reaper(adapter)
+        await shut_down(adapter)
     result.rejections = buffer.getvalue().count(REJECTION_MARKER)
     return result
 
@@ -298,7 +294,7 @@ async def run_abandoned(
                 if not admitted and not ws.sent:
                     result.silent_rejections += 1
     finally:
-        await stop_reaper(adapter)
+        await shut_down(adapter)
     result.rejections = buffer.getvalue().count(REJECTION_MARKER)
     return result
 
@@ -307,12 +303,8 @@ async def run_all(
     clients: int, abandoned: int
 ) -> dict[str, dict[str, Result]]:
     """Run every scenario against both implementations."""
-    # keep the generated bitbang identity out of the operator's home
-    os.environ["HOME"] = tempfile.mkdtemp(prefix="bitbang-loadtest-home-")
     publisher = load_publisher()
-    install_doubles(sys.modules["bitbang.adapter"])
-    # a rejected client receives no signaling traffic at all, so give the
-    # burst scenario the same silent-rejection accounting as the others
+    install_doubles(bitbang_adapter)
     results: dict[str, dict[str, Result]] = {}
     for kind in ("baseline", "fixed"):
         results[kind] = {
@@ -387,10 +379,10 @@ def report(results: dict[str, dict[str, Result]], clients: int) -> int:
         f"{results['fixed']['reaped'].silent_rejections}."
     )
     emit()
-    expected = (
-        base_burst.rejected > 0
-        and fixed_burst.rejected == 0
-        and fixed_reaped.rejected == 0
+    # stock bitbang only refuses a burst larger than its admission cap
+    burst_overflows = clients > bitbang_adapter.MAX_UNAUTH_PEERS
+    expected = (base_burst.rejected > 0 or not burst_overflows) and (
+        fixed_burst.rejected == 0 and fixed_reaped.rejected == 0
     )
     if expected:
         emit("RESULT: reproduced the defect, and the fix removes it.")
