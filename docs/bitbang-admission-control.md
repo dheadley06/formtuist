@@ -109,6 +109,15 @@ A few choices are deliberate and are covered by regression tests.
   opened or refreshed the page in that window saw "Device not found".
   `FormtuistBitBang` now drops such a candidate, which affects only the browser
   that sent it.
+- **Bitbang is capped below 0.2, and a contract test guards its internals.**
+  `FormtuistBitBang` overrides methods that bitbang treats as private, which a
+  release may change without notice. `pyproject.toml` therefore requires
+  `bitbang>=0.1.55,<0.2`. A minor release, which may break things before 1.0,
+  needs a deliberate upgrade. A patch release can still change private methods,
+  so `TestBitbangContract` in `tests/test_bitbang_admission.py` records the
+  signature of every overridden method. It also checks the constructor keywords
+  and attributes that `publish_form` uses, and the peer keys the adapter reads,
+  and fails loudly if any of them change. Versions 0.1.55 and 0.1.56 both pass.
 
 The refusal that remains for genuinely stuck sessions is still silent, because
 bitbang's signaling protocol has no message that tells the browser it was
@@ -149,17 +158,17 @@ arrivals forever and the fix admits all of them.
 uv run pytest tests/test_bitbang_admission.py
 ```
 
-Forty-five tests cover stuck-session accounting, age stamps, peer reaping
-(including the reconnect races), adapter shutdown, the send deadline, and
-candidate handling. One test drives bitbang's real WSGI send loop to show that a
-stalled stream ends with a complete 500 response. Another drives bitbang's real
-signaling loop to show that an empty end-of-candidates marker no longer stops
-the publisher from answering the requests that follow. The tests reuse the load
-test's doubles. Every adapter uses an ephemeral identity, so nothing is written
-to `~/.bitbang`. As a second safeguard, the tests point both `HOME` and
-`USERPROFILE` at a temporary directory, since Windows resolves `~` through
-`USERPROFILE`. Bitbang's console output is captured, so the suite stays silent
-even under `pytest -s`.
+Fifty-four tests cover the bitbang contract, stuck-session accounting, age
+stamps, peer reaping (including the reconnect races), adapter shutdown, the send
+deadline, and candidate handling. One test drives bitbang's real WSGI send loop
+to show that a stalled stream ends with a complete 500 response. Another drives
+bitbang's real signaling loop to show that an empty end-of-candidates marker no
+longer stops the publisher from answering the requests that follow. The tests
+reuse the load test's doubles. Every adapter uses an ephemeral identity, so
+nothing is written to `~/.bitbang`. As a second safeguard, the tests point both
+`HOME` and `USERPROFILE` at a temporary directory, since Windows resolves `~`
+through `USERPROFILE`. Bitbang's console output is captured, so the suite stays
+silent even under `pytest -s`.
 
 ### 3. A manual smoke test
 

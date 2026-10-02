@@ -1,6 +1,6 @@
 # /// script
 # requires-python = ">=3.12"
-# dependencies = ["bitbang>=0.1.55"]
+# dependencies = ["bitbang>=0.1.55,<0.2"]
 # ///
 """Load-test bitbang admission control the way a class actually hits it.
 

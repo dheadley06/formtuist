@@ -2,6 +2,7 @@
 
 import asyncio
 import contextlib
+import inspect
 import io
 import json
 import struct
@@ -63,6 +64,30 @@ HOST_CANDIDATE = (
 END_OF_CANDIDATES = ""
 GARBLED_CANDIDATE = "garbled"
 MEDIA_ID = "0"
+# bitbang treats the methods that FormtuistBitBang overrides as private, so a
+# release may change them without notice; each entry records the parameters
+# and the kind of method (coroutine or not) that the override assumes
+OVERRIDDEN_METHODS = {
+    "setup_peer_connection": (("self", "pc", "client_id"), False),
+    "handle_request": (("self", "ws", "message"), True),
+    "_add_ice_candidate": (("self", "data"), False),
+    "close": (("self",), True),
+    "_count_unauth_live": (("self",), False),
+    "_send_with_backpressure": (
+        ("self", "channel", "frame", "limit", "sctp"),
+        True,
+    ),
+}
+# what publish_form passes to bitbang's constructor and then sets on it
+ADAPTER_KEYWORDS = ("program_name", "server", "pin", "ephemeral")
+ADAPTER_ATTRIBUTES = ("peers", "ws_target")
+# the keys that FormtuistBitBang reads from each peer bitbang registers
+PEER_KEYS = (
+    publisher.PEER_CONNECTION_KEY,
+    publisher.PEER_AUTHENTICATED_KEY,
+    publisher.PEER_RELAY_GATE_KEY,
+)
+DUNDER_PREFIX = "__"
 
 
 class FailingDataChannel(FakeDataChannel):
@@ -161,6 +186,52 @@ def offline_bitbang(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     )
     for variable in HOME_VARIABLES:
         monkeypatch.setenv(variable, str(tmp_path))
+
+
+class TestBitbangContract:
+    """Fail loudly if a bitbang release changes the internals we rely on."""
+
+    @pytest.mark.parametrize("name", sorted(OVERRIDDEN_METHODS))
+    def test_overridden_method_keeps_its_signature(self, name: str) -> None:
+        """Bitbang and the override still agree on each method's shape."""
+        parameters, is_coroutine = OVERRIDDEN_METHODS[name]
+        theirs = getattr(bitbang_adapter.BitBangWSGI, name, None)
+        ours = getattr(publisher.FormtuistBitBang, name)
+        assert theirs is not None
+        for method in (theirs, ours):
+            assert tuple(inspect.signature(method).parameters) == parameters
+            assert inspect.iscoroutinefunction(method) is is_coroutine
+
+    def test_every_override_is_covered_by_the_contract(self) -> None:
+        """A new override of a bitbang method must be listed above."""
+        overridden = {
+            name
+            for name in vars(publisher.FormtuistBitBang)
+            if not name.startswith(DUNDER_PREFIX)
+            and hasattr(bitbang_adapter.BitBangWSGI, name)
+        }
+        assert overridden == set(OVERRIDDEN_METHODS)
+
+    def test_constructor_accepts_what_publish_passes(self) -> None:
+        """Bitbang still takes the keywords and sets the attributes we use."""
+        keywords = inspect.signature(
+            bitbang_adapter.BitBangWSGI.__init__
+        ).parameters
+        assert set(ADAPTER_KEYWORDS) <= set(keywords)
+        adapter = make_adapter()
+        for attribute in ADAPTER_ATTRIBUTES:
+            assert hasattr(adapter, attribute)
+
+    def test_registered_peer_has_the_keys_formtuist_reads(self) -> None:
+        """Every peer bitbang registers carries the keys the adapter reads."""
+
+        async def scenario() -> None:
+            adapter = make_adapter()
+            await offer(adapter, CLIENT)
+            assert set(PEER_KEYS) <= set(adapter.peers[CLIENT])
+            await adapter.close()
+
+        run_quietly(scenario)
 
 
 class TestStuckSessionAdmission:
