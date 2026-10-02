@@ -51,10 +51,18 @@ REJECTION_MARKER = "too many pending"
 BROKEN_MARKER = "Error handling request"
 
 # probe ages for the abandoned-session scenarios, chosen against the tuned
-# thresholds the harness installs: stuck_after=0.05, stale_after=0.15
-PROBE_STUCK_SECONDS = 0.08  # past stuck_after, before stale_after
+# thresholds each scenario installs
+PROBE_STUCK_SECONDS = 0.08  # past stuck_after, long before stale_after
 PROBE_REAPED_SECONDS = 0.30  # past stale_after, so the reaper has run
-TUNING = {
+# the stuck scenario must never reap, so its stale_after sits far beyond the
+# probe; a margin of a few milliseconds would let a slow machine reap the
+# abandoned sessions while the late arrivals are still being offered
+STUCK_TUNING = {
+    "stuck_after": 0.05,
+    "stale_after": 5.0,
+    "reap_interval": 0.02,
+}
+REAPED_TUNING = {
     "stuck_after": 0.05,
     "stale_after": 0.15,
     "reap_interval": 0.02,
@@ -273,12 +281,17 @@ async def run_burst(
     return result
 
 
-async def run_abandoned(
-    kind: str, publisher: Any, abandoned: int, late: int, age: float
+async def run_abandoned(  # noqa: PLR0913, PLR0917
+    kind: str,
+    publisher: Any,
+    abandoned: int,
+    late: int,
+    age: float,
+    tuning: dict[str, float],
 ) -> Result:
     """Abandon some sessions, age them, then offer from late arrivals."""
     result = Result(f"abandoned age={age:.2f}s")
-    adapter = build_adapter(kind, publisher, TUNING)
+    adapter = build_adapter(kind, publisher, tuning)
     buffer = io.StringIO()
     try:
         with contextlib.redirect_stdout(buffer):
@@ -301,21 +314,29 @@ async def run_abandoned(
 
 
 async def run_all(
-    clients: int, abandoned: int
+    clients: int, abandoned: int, publisher: Any
 ) -> dict[str, dict[str, Result]]:
     """Run every scenario against both implementations."""
-    publisher = load_publisher()
-    install_doubles(bitbang_adapter)
     results: dict[str, dict[str, Result]] = {}
     for kind in ("baseline", "fixed"):
         results[kind] = {
             "burst": await run_burst(kind, publisher, clients, False),
             "burst+auth": await run_burst(kind, publisher, clients, True),
             "stuck": await run_abandoned(
-                kind, publisher, abandoned, abandoned, PROBE_STUCK_SECONDS
+                kind,
+                publisher,
+                abandoned,
+                abandoned,
+                PROBE_STUCK_SECONDS,
+                STUCK_TUNING,
             ),
             "reaped": await run_abandoned(
-                kind, publisher, abandoned, abandoned, PROBE_REAPED_SECONDS
+                kind,
+                publisher,
+                abandoned,
+                abandoned,
+                PROBE_REAPED_SECONDS,
+                REAPED_TUNING,
             ),
         }
     return results
@@ -374,8 +395,8 @@ def report(results: dict[str, dict[str, Result]], clients: int) -> int:
         f"{fixed_reaped.reaped} stale peers."
     )
     emit(
-        f"  silent rejections (browser gets no reply, waits on "
-        f"'Loading...'): baseline "
+        f"  silent rejections (the browser's request gets no reply at "
+        f"all): baseline "
         f"{results['baseline']['reaped'].silent_rejections}, fixed "
         f"{results['fixed']['reaped'].silent_rejections}."
     )
@@ -409,7 +430,11 @@ def main() -> int:
     )
     args = parser.parse_args()
     started = time.monotonic()
-    results = asyncio.run(run_all(args.clients, args.abandoned))
+    # the doubles replace aiortc for this whole process, which is why this
+    # happens here and not in run_all, where a test suite would inherit it
+    publisher = load_publisher()
+    install_doubles(bitbang_adapter)
+    results = asyncio.run(run_all(args.clients, args.abandoned, publisher))
     code = report(results, args.clients)
     elapsed = time.monotonic() - started
     emit(f"completed in {elapsed:.1f}s")

@@ -152,6 +152,14 @@ abandoned age=0.30s                   10 rejected     0 rejected
 `abandoned age=0.30s` shows the reaped case, where stock refuses the late
 arrivals forever and the fix admits all of them.
 
+The same scenarios also run in the test suite, in
+`tests/test_bitbang_loadtest.py`, for a class of thirty and for a group of five
+that stock bitbang never refuses. Those tests assert every row of the table
+above and both outcomes of the verdict, so `uv run task all` fails if the fix
+stops removing the lockout. The stuck scenario never reaps, so its reap
+threshold sits far beyond its probe age; a slow machine therefore cannot reap
+the abandoned sessions part-way through and turn the result flaky.
+
 ### 2. The unit tests
 
 ```bash
