@@ -99,6 +99,16 @@ A few choices are deliberate and are covered by regression tests.
   `setup_peer_connection`, which bitbang calls in the same synchronous step
   that registers the peer. A refused request is therefore never stamped, and
   the reaper prunes any stamp left without a peer.
+- **A bad ICE candidate is ignored instead of taking the publisher offline.**
+  Bitbang parses each candidate a browser trickles in inside its signaling
+  loop, with no error handling. A candidate that aiortc cannot parse, such as
+  the empty end-of-candidates marker the WebRTC specification allows, raised
+  out of that loop. The publisher then dropped off the signaling server and
+  waited three seconds before registering again. Tabs that were already
+  connected kept working, because their traffic is peer to peer, but anyone who
+  opened or refreshed the page in that window saw "Device not found".
+  `FormtuistBitBang` now drops such a candidate, which affects only the browser
+  that sent it.
 
 The refusal that remains for genuinely stuck sessions is still silent, because
 bitbang's signaling protocol has no message that tells the browser it was
@@ -139,14 +149,17 @@ arrivals forever and the fix admits all of them.
 uv run pytest tests/test_bitbang_admission.py
 ```
 
-Thirty-nine tests cover stuck-session accounting, age stamps, peer reaping
-(including the reconnect races), adapter shutdown, and the send deadline. One
-test drives bitbang's real WSGI send loop to show that a stalled stream ends
-with a complete 500 response. The tests reuse the load test's doubles. Every
-adapter uses an ephemeral identity, so nothing is written to `~/.bitbang`. As a
-second safeguard, the tests point both `HOME` and `USERPROFILE` at a temporary
-directory, since Windows resolves `~` through `USERPROFILE`. Bitbang's console
-output is captured, so the suite stays silent even under `pytest -s`.
+Forty-five tests cover stuck-session accounting, age stamps, peer reaping
+(including the reconnect races), adapter shutdown, the send deadline, and
+candidate handling. One test drives bitbang's real WSGI send loop to show that a
+stalled stream ends with a complete 500 response. Another drives bitbang's real
+signaling loop to show that an empty end-of-candidates marker no longer stops
+the publisher from answering the requests that follow. The tests reuse the load
+test's doubles. Every adapter uses an ephemeral identity, so nothing is written
+to `~/.bitbang`. As a second safeguard, the tests point both `HOME` and
+`USERPROFILE` at a temporary directory, since Windows resolves `~` through
+`USERPROFILE`. Bitbang's console output is captured, so the suite stays silent
+even under `pytest -s`.
 
 ### 3. A manual smoke test
 

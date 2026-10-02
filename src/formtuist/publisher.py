@@ -156,6 +156,16 @@ class FormtuistBitBang(BitBangWSGI):
         self._ensure_reaper()
         await super().handle_request(ws, message)
 
+    def _add_ice_candidate(self, data: dict[str, Any]) -> None:
+        """Add a browser's ICE candidate unless it cannot be parsed."""
+        # bitbang parses candidates inside its signaling loop with no error
+        # handling, so an empty end-of-candidates marker or any malformed
+        # candidate would drop the publisher off the signaling server, and
+        # every new visitor would see "Device not found" until it registered
+        # again; losing one candidate affects only the browser that sent it
+        with contextlib.suppress(Exception):
+            super()._add_ice_candidate(data)
+
     async def close(self) -> None:
         """Stop the reaper, then close and forget every peer."""
         reaper, self._reaper = self._reaper, None

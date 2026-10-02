@@ -56,6 +56,13 @@ FRAME_HEADER_SIZE = 8
 SERVER_ERROR = 500
 GET_ROOT = {"method": "GET", "pathname": "/"}
 FRAME = b"frame"
+# ICE candidates as a browser trickles them through the signaling server
+HOST_CANDIDATE = (
+    "candidate:1 1 udp 2122260223 abcd-ef.local 54321 typ host generation 0"
+)
+END_OF_CANDIDATES = ""
+GARBLED_CANDIDATE = "garbled"
+MEDIA_ID = "0"
 
 
 class FailingDataChannel(FakeDataChannel):
@@ -64,6 +71,47 @@ class FailingDataChannel(FakeDataChannel):
     def send(self, data: bytes) -> None:
         """Refuse every frame."""
         raise RuntimeError("send failed")
+
+
+class ScriptEndedError(Exception):
+    """Signal that a scripted signaling socket has no messages left."""
+
+
+class ScriptedSignaling(FakeSignaling):
+    """Signaling socket that delivers a fixed list of messages, then ends."""
+
+    def __init__(self, messages: list[dict[str, Any]]) -> None:
+        """Queue the messages that the device will receive in order."""
+        super().__init__()
+        self.incoming = [json.dumps(message) for message in messages]
+
+    async def recv(self) -> str:
+        """Deliver the next message, or end the script when none remain."""
+        if not self.incoming:
+            raise ScriptEndedError
+        return self.incoming.pop(0)
+
+
+def request_message(client_id: str) -> dict[str, Any]:
+    """Build a connection request as the signaling server forwards it."""
+    return {
+        "type": "request",
+        "client_id": client_id,
+        "browser_ip": BROWSER_IP,
+    }
+
+
+def candidate_message(client_id: str, candidate: str) -> dict[str, Any]:
+    """Build an ICE candidate message as the signaling server forwards it."""
+    return {
+        "type": "candidate",
+        "client_id": client_id,
+        "candidate": {
+            "candidate": candidate,
+            "sdpMid": MEDIA_ID,
+            "sdpMLineIndex": 0,
+        },
+    }
 
 
 def make_adapter(**tuning: Any) -> publisher.FormtuistBitBang:
@@ -509,6 +557,75 @@ class TestPeerReaping:
             monkeypatch.setattr(peer["pc"], "close", explode)
             assert await adapter._drop_peer(CLIENT, peer)
             assert CLIENT not in adapter.peers
+            await adapter.close()
+
+        run_quietly(scenario)
+
+
+class TestCandidateHandling:
+    """One browser's bad candidate must never take the publisher offline."""
+
+    def test_valid_candidate_reaches_the_connection(self) -> None:
+        """A well-formed candidate is still handed to the peer connection."""
+
+        async def scenario() -> None:
+            adapter = make_adapter()
+            await offer(adapter, CLIENT)
+            adapter._add_ice_candidate(
+                candidate_message(CLIENT, HOST_CANDIDATE)
+            )
+            await asyncio.sleep(0)
+            assert len(adapter.peers[CLIENT]["pc"].candidates) == 1
+            await adapter.close()
+
+        run_quietly(scenario)
+
+    @pytest.mark.parametrize(
+        "message",
+        [
+            candidate_message(CLIENT, END_OF_CANDIDATES),
+            candidate_message(CLIENT, GARBLED_CANDIDATE),
+            {"type": "candidate", "client_id": CLIENT},
+            {
+                "type": "candidate",
+                "client_id": CLIENT,
+                "candidate": GARBLED_CANDIDATE,
+            },
+        ],
+    )
+    def test_unusable_candidates_are_ignored(
+        self, message: dict[str, Any]
+    ) -> None:
+        """An empty, garbled, or missing candidate is dropped quietly."""
+
+        async def scenario() -> None:
+            adapter = make_adapter()
+            await offer(adapter, CLIENT)
+            adapter._add_ice_candidate(message)
+            await asyncio.sleep(0)
+            assert adapter.peers[CLIENT]["pc"].candidates == []
+            await adapter.close()
+
+        run_quietly(scenario)
+
+    def test_bad_candidate_does_not_end_the_signaling_loop(self) -> None:
+        """Requests after an end-of-candidates marker are still served."""
+
+        async def scenario() -> None:
+            adapter = make_adapter()
+            signaling = ScriptedSignaling(
+                [
+                    request_message(CLIENT),
+                    candidate_message(CLIENT, END_OF_CANDIDATES),
+                    request_message(OTHER_CLIENT),
+                ]
+            )
+            with pytest.raises(ScriptEndedError):
+                await adapter._message_loop(signaling)
+            offered = [
+                json.loads(sent)["client_id"] for sent in signaling.sent
+            ]
+            assert offered == [CLIENT, OTHER_CLIENT]
             await adapter.close()
 
         run_quietly(scenario)

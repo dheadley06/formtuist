@@ -131,6 +131,7 @@ class FakePeerConnection:
         self.localDescription = SimpleNamespace(sdp="v=0\r\nfake")
         self.sctp = None
         self.closed = False
+        self.candidates: list[Any] = []
         self._handlers: dict[str, Any] = {}
 
     def createDataChannel(self, label: str) -> FakeDataChannel:
@@ -162,8 +163,8 @@ class FakePeerConnection:
         self.iceConnectionState = "closed"
 
     async def addIceCandidate(self, candidate: Any) -> None:
-        """Accept and ignore a candidate."""
-        return None
+        """Record a candidate that bitbang hands to the connection."""
+        self.candidates.append(candidate)
 
     def getTransceivers(self) -> list[Any]:
         """Report no transceivers, so stream metadata stays empty."""
